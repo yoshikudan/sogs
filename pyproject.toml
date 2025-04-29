@@ -12,7 +12,9 @@ dependencies = [
     "torch",
     "torchpq",
     "plas@git+https://github.com/fraunhoferhhi/PLAS.git",
-    "plyfile"
+    "plyfile",
+    "tyro",
+    "Pillow"
 ]
 
 [project.scripts]
