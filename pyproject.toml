@@ -9,9 +9,6 @@ authors = [{ name="Vincent Woo", email="me@vincentwoo.com" }]
 
 dependencies = [
     "numpy",
-    "torch",
-    "torchpq",
-    "plas@git+https://github.com/fraunhoferhhi/PLAS.git",
     "plyfile",
     "tyro",
     "Pillow"
