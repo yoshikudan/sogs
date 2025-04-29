@@ -26,3 +26,6 @@ packages = ["src/sogs"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[project.urls]
+Homepage = "https://github.com/vincentwoo/SOGS/"
