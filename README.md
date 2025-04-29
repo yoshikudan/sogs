@@ -11,7 +11,7 @@ Requires [torch](https://pytorch.org/get-started/locally/), [torchpq](https://gi
 For instance, if you're running CUDA 12.6 on Windows you may install these dependencies (ideally in some kind of virtual environment):
 
 ```
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+pip install torch --index-url https://download.pytorch.org/whl/cu126
 pip install cupy-cuda12x
 pip install torchpq
 pip install git+https://github.com/fraunhoferhhi/PLAS.git
