@@ -1,6 +1,5 @@
 import json
 import os
-from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
 import numpy as np
@@ -10,11 +9,9 @@ from torchpq.clustering import KMeans
 from torch import Tensor
 from plas import sort_with_plas
 
-import tyro
 from plyfile import PlyData, PlyElement
 from pathlib import Path
 from PIL import Image
-
 
 """Uses quantization and sorting to compress splats into PNG files and uses
 K-means clustering to compress the spherical harmonic coefficents.
@@ -356,13 +353,3 @@ def read_ply(path):
         splats["shN"] = shn_tensor.cuda()
 
     return splats
-
-@dataclass
-class Config:
-    ply: Path
-    output_dir: Path
-
-cfg = tyro.cli(Config)
-os.makedirs(cfg.output_dir, exist_ok=True)
-splats = read_ply(cfg.ply)
-run_compression(cfg.output_dir, splats)
