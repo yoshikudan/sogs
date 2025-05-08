@@ -308,7 +308,6 @@ def read_ply(path):
         return col_name in vd.dtype.names
 
     xyz = np.stack([vd['x'], vd['y'], vd['z']], axis=-1)
-    normals = np.stack([vd['nx'], vd['ny'], vd['nz']], axis=-1)
     f_dc = np.stack([vd[f"f_dc_{i}"] for i in range(3)], axis=-1)
 
     # -- f_rest (variable number: 0 to many) --
