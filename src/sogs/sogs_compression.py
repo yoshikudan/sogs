@@ -39,7 +39,7 @@ def _get_compress_fn(param_name: str) -> Callable:
     compress_fn_map = {
         "means": _compress_16bit,
         "scales": _compress,
-        "quats": _compress,
+        "quats": _compress_quats,
         # "opacities" no longer compressed separately
         "sh0": _compress,  # placeholder, actual handling in run_compression
         "shN": _compress_kmeans,
@@ -60,7 +60,7 @@ def run_compression(compress_dir: str, splats: Dict[str, Tensor]) -> None:
     splats["quats"] = F.normalize(splats["quats"], dim=-1)
     neg_mask = splats["quats"][..., 3] < 0
     splats["quats"][neg_mask] *= -1
-    splats["quats"] = splats["quats"][..., :3]
+    # splats["quats"] = splats["quats"][..., :3]
 
     n_gs = len(splats["means"])
     n_sidelen = int(n_gs**0.5)
@@ -267,6 +267,59 @@ def _compress_kmeans(
     }
     return meta
 
+def pack_quaternion_to_rgba_tensor(q: Tensor) -> Tensor:
+    """
+    Packs a batch of quaternions into RGBA channels:
+      - R,G,B: the three smallest components, scaled by sqrt(2) then mapped from [-1,1]→[0,1]
+      - A: index of largest-abs component (0→3) mapped [0,3]→[0,1]
+    q: (...,4)
+    returns: (...,4) in [0,1]
+    """
+    abs_q = q.abs()
+    max_idx = abs_q.argmax(dim=-1)  # (...)
+
+    # ensure largest component is positive
+    max_vals = q.gather(-1, max_idx.unsqueeze(-1)).squeeze(-1)
+    sign = max_vals.sign()
+    sign[sign == 0] = 1
+    q_signed = q * sign.unsqueeze(-1)
+
+    # build variants dropping each component
+    variants = []
+    for i in range(4):
+        dims = list(range(4))
+        dims.remove(i)
+        variants.append(q_signed[..., dims])  # (...,3)
+    stacked = torch.stack(variants, dim=-2)  # (...,4,3)
+
+    # select the appropriate 3-vector based on max_idx
+    idx_exp = max_idx.unsqueeze(-1).unsqueeze(-1).expand(*max_idx.shape, 1, 3)
+    small = torch.gather(stacked, dim=-2, index=idx_exp).squeeze(-2)  # (...,3)
+
+    # scale by sqrt(2) to normalize range to [-1,1]
+    small = small * torch.sqrt(torch.tensor(2.0, device=small.device, dtype=small.dtype))
+
+    # map from [-1,1] to [0,1]
+    rgb = small * 0.5 + 0.5
+    a = (252.0 + max_idx.to(torch.float32)) / 255.0
+    return torch.cat([rgb, a.unsqueeze(-1)], dim=-1)
+
+def _compress_quats(
+    compress_dir: str, param_name: str, params: Tensor, n_sidelen: int
+) -> Dict[str, Any]:
+    """Compress quaternions by packing into RGBA and saving as an 8-bit image."""
+    # params: (n_splats,4)
+    rgba = pack_quaternion_to_rgba_tensor(params)
+    img = (rgba.view(n_sidelen, n_sidelen, 4).cpu().numpy() * 255.0).round().astype(np.uint8)
+    filename = write_image(compress_dir, f"{param_name}", img)
+
+    meta = {
+        "shape": list(params.shape),
+        "dtype": "uint8",
+        "encoding": "quaternion_packed",
+        "files": [filename]
+    }
+    return meta
 
 def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
     """Sort splats with Parallel Linear Assignment Sorting from the paper.
