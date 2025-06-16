@@ -15,7 +15,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu126
 pip install cupy-cuda12x
 pip install torchpq
 pip install git+https://github.com/fraunhoferhhi/PLAS.git
-pip install sogs
+pip install -e ./sogs
 ```
 
 ## Usage
