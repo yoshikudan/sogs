@@ -61,6 +61,8 @@ def run_compression(compress_dir: str, splats: Dict[str, Tensor]) -> None:
     neg_mask = splats["quats"][..., 3] < 0
     splats["quats"][neg_mask] *= -1
     # splats["quats"] = splats["quats"][..., :3]
+    splats["sh0"] = splats["sh0"].clamp(-3.0, 3.0)
+    splats["shN"] = splats["shN"].clamp(-6.0, 6.0)
 
     n_gs = len(splats["means"])
     n_sidelen = int(n_gs**0.5)
