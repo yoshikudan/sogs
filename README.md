@@ -34,5 +34,5 @@ pip install -e ./sogs
 
 And invoke it from the `/src` folder like so:
 ```
-python.exe -m sogs.cli --ply filename.ply --output-dir the_output
+python.exe -m sogs.cli --ply filename.ply --output_dir directory_name
 ```
