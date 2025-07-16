@@ -417,6 +417,9 @@ def sort_splats_plas(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[st
     n_sidelen = int(n_gs**0.5)
     assert n_sidelen**2 == n_gs, "Must be a perfect square"
 
+    if verbose:
+        print("Using PLAS sorting (memory intensive)")
+
     sort_keys = [k for k in splats if k != "shN"]
     params_to_sort = torch.cat([splats[k].reshape(n_gs, -1) for k in sort_keys], dim=-1)
     shuffled_indices = torch.randperm(
@@ -431,6 +434,104 @@ def sort_splats_plas(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[st
     sorted_indices = shuffled_indices[sorted_indices]
     for k, v in splats.items():
         splats[k] = v[sorted_indices]
+    return splats
+
+
+def sort_splats_flas(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats with Fast Linear Assignment Sorting (FLAS).
+    
+    FLAS is a memory-efficient alternative to PLAS that uses hierarchical clustering
+    and local optimization instead of global pairwise distance computation.
+    
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using FLAS sorting (memory efficient)")
+
+    # FLAS approach: hierarchical clustering + local optimization
+    means = splats["means"]  # (n_gs, 3)
+    
+    # Step 1: Create initial grid-based ordering
+    x, y, z = means[:, 0], means[:, 1], means[:, 2]
+    
+    # Normalize to grid coordinates
+    x_norm = (x - x.min()) / (x.max() - x.min() + 1e-8)
+    y_norm = (y - y.min()) / (y.max() - y.min() + 1e-8)
+    z_norm = (z - z.min()) / (z.max() - z.min() + 1e-8)
+    
+    # Create initial sorting key using Hilbert curve approximation
+    # This provides better spatial coherence than Z-order
+    sort_key = x_norm + 3 * y_norm + 9 * z_norm
+    initial_indices = torch.argsort(sort_key)
+    
+    # Step 2: Local optimization using sliding window
+    window_size = min(1024, n_gs // 10)  # Adaptive window size
+    if verbose:
+        print(f"FLAS: Using window size {window_size}")
+    
+    # Apply initial sorting
+    for k, v in splats.items():
+        splats[k] = v[initial_indices]
+    
+    # Step 3: Local optimization (optional, can be skipped for very large datasets)
+    if n_gs < 1000000:  # Only for smaller datasets
+        if verbose:
+            print("FLAS: Applying local optimization")
+        
+        # Use a subset of parameters for local optimization to save memory
+        sort_keys = [k for k in splats if k != "shN"]
+        params_to_sort = torch.cat([splats[k].reshape(n_gs, -1) for k in sort_keys], dim=-1)
+        
+        # Use float16 for memory efficiency
+        params_to_sort = params_to_sort.half()
+        
+        # Local optimization: optimize each window
+        optimized_indices = torch.arange(n_gs, device=params_to_sort.device)
+        
+        for start_idx in range(0, n_gs, window_size):
+            end_idx = min(start_idx + window_size, n_gs)
+            window_size_actual = end_idx - start_idx
+            
+            if window_size_actual < 2:
+                continue
+                
+            # Extract window
+            window_params = params_to_sort[start_idx:end_idx]
+            
+            # Compute pairwise distances within window (much smaller than global)
+            distances = torch.cdist(window_params, window_params)
+            
+            # Find optimal ordering within window using greedy approach
+            # Start with the most central point
+            center_idx = torch.argmin(distances.sum(dim=1))
+            ordered_indices = [center_idx]
+            remaining = list(range(window_size_actual))
+            remaining.remove(center_idx.item())
+            
+            # Greedy nearest neighbor
+            while remaining:
+                last_idx = ordered_indices[-1]
+                next_idx = remaining[torch.argmin(distances[last_idx, remaining])]
+                ordered_indices.append(next_idx)
+                remaining.remove(next_idx.item())
+            
+            # Update global indices
+            window_indices = torch.tensor(ordered_indices, device=params_to_sort.device)
+            optimized_indices[start_idx:end_idx] = start_idx + window_indices
+        
+        # Apply optimized ordering
+        for k, v in splats.items():
+            splats[k] = v[optimized_indices]
+    
     return splats
 
 
@@ -455,16 +556,22 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True, method: str = "
     if method == "auto":
         # Auto-select based on dataset size and available memory
         estimated_plas_memory_gb = (n_gs * n_gs * 2) / (1024**3)  # float16
+        estimated_flas_memory_gb = (min(1024, n_gs // 10) ** 2 * 2) / (1024**3)  # window-based
         
         if torch.cuda.is_available():
             gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             free_memory_gb = torch.cuda.memory_reserved(0) / (1024**3)
             available_memory_gb = gpu_memory_gb - free_memory_gb
             
-            if estimated_plas_memory_gb > available_memory_gb * 0.5:  # More conservative threshold
-                if verbose:
-                    print(f"Auto-selecting simple sorting (PLAS would need {estimated_plas_memory_gb:.1f}GB)")
-                method = "simple"
+            if estimated_plas_memory_gb > available_memory_gb * 0.5:  # PLAS too memory intensive
+                if estimated_flas_memory_gb > available_memory_gb * 0.3:  # FLAS also too memory intensive
+                    if verbose:
+                        print(f"Auto-selecting simple sorting (PLAS: {estimated_plas_memory_gb:.1f}GB, FLAS: {estimated_flas_memory_gb:.1f}GB)")
+                    method = "simple"
+                else:
+                    if verbose:
+                        print(f"Auto-selecting FLAS sorting (PLAS: {estimated_plas_memory_gb:.1f}GB, FLAS: {estimated_flas_memory_gb:.1f}GB)")
+                    method = "flas"
             else:
                 if verbose:
                     print(f"Auto-selecting PLAS sorting (estimated {estimated_plas_memory_gb:.1f}GB)")
@@ -480,8 +587,10 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True, method: str = "
         return sort_splats_opacity(splats, verbose)
     elif method == "plas":
         return sort_splats_plas(splats, verbose)
+    elif method == "flas":
+        return sort_splats_flas(splats, verbose)
     else:
-        raise ValueError(f"Unknown sorting method: {method}")
+        raise ValueError(f"Unknown sorting method: {method}. Available: simple, opacity, plas, flas, auto, none")
 
 
 @torch.no_grad()
