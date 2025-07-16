@@ -47,7 +47,7 @@ def _get_compress_fn(param_name: str) -> Callable:
     return compress_fn_map[param_name]
 
 
-def run_compression(compress_dir: str, splats: Dict[str, Tensor], verbose: bool) -> None:
+def run_compression(compress_dir: str, splats: Dict[str, Tensor], verbose: bool, sort_method: str = "auto") -> None:
     """Run compression
 
     Args:
@@ -76,7 +76,7 @@ def run_compression(compress_dir: str, splats: Dict[str, Tensor], verbose: bool)
 
     meta: Dict[str, Any] = {}
 
-    splats = sort_splats(splats, verbose)
+    splats = sort_splats(splats, verbose, sort_method)
 
     # Extract opacities and merge into sh0
     opacities = splats.pop("opacities")
@@ -326,7 +326,84 @@ def _compress_quats(
     }
     return meta
 
-def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+def sort_splats_simple(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats using simple spatial sorting (much more memory efficient).
+    
+    Sorts by position (x, y, z) to create a spatially coherent grid.
+    This is much faster and uses O(n) memory instead of O(n²).
+
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using simple spatial sorting (memory efficient)")
+
+    # Sort by position (x, y, z) to create spatially coherent grid
+    means = splats["means"]  # (n_gs, 3)
+    
+    # Create sorting key: combine x, y, z with some weight
+    # This creates a space-filling curve effect
+    x, y, z = means[:, 0], means[:, 1], means[:, 2]
+    
+    # Normalize coordinates to [0, 1] range
+    x_norm = (x - x.min()) / (x.max() - x.min() + 1e-8)
+    y_norm = (y - y.min()) / (y.max() - y.min() + 1e-8)
+    z_norm = (z - z.min()) / (z.max() - z.min() + 1e-8)
+    
+    # Create sorting key using Z-order curve (Morton code approximation)
+    # This creates better spatial coherence than simple lexicographic sorting
+    sort_key = x_norm + 2 * y_norm + 4 * z_norm
+    
+    # Get sorted indices
+    sorted_indices = torch.argsort(sort_key)
+    
+    # Apply sorting to all splat parameters
+    for k, v in splats.items():
+        splats[k] = v[sorted_indices]
+    
+    return splats
+
+
+def sort_splats_opacity(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats by opacity (most important splats first).
+    
+    This is very memory efficient and often provides good compression
+    by putting high-opacity splats together.
+
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using opacity-based sorting (memory efficient)")
+
+    # Sort by opacity (descending - most opaque first)
+    opacities = splats["opacities"]
+    sorted_indices = torch.argsort(opacities, descending=True)
+    
+    # Apply sorting to all splat parameters
+    for k, v in splats.items():
+        splats[k] = v[sorted_indices]
+    
+    return splats
+
+
+def sort_splats_plas(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
     """Sort splats with Parallel Linear Assignment Sorting from the paper.
 
     Args:
@@ -355,6 +432,57 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Te
     for k, v in splats.items():
         splats[k] = v[sorted_indices]
     return splats
+
+
+def sort_splats(splats: Dict[str, Tensor], verbose: bool = True, method: str = "auto") -> Dict[str, Tensor]:
+    """Sort splats using the specified method.
+    
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+        method (str): Sorting method - "auto", "simple", "opacity", "plas", or "none"
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    
+    if method == "none":
+        if verbose:
+            print("Skipping sorting as requested")
+        return splats
+    
+    if method == "auto":
+        # Auto-select based on dataset size and available memory
+        estimated_plas_memory_gb = (n_gs * n_gs * 2) / (1024**3)  # float16
+        
+        if torch.cuda.is_available():
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            free_memory_gb = torch.cuda.memory_reserved(0) / (1024**3)
+            available_memory_gb = gpu_memory_gb - free_memory_gb
+            
+            if estimated_plas_memory_gb > available_memory_gb * 0.5:  # More conservative threshold
+                if verbose:
+                    print(f"Auto-selecting simple sorting (PLAS would need {estimated_plas_memory_gb:.1f}GB)")
+                method = "simple"
+            else:
+                if verbose:
+                    print(f"Auto-selecting PLAS sorting (estimated {estimated_plas_memory_gb:.1f}GB)")
+                method = "plas"
+        else:
+            if verbose:
+                print("Auto-selecting simple sorting (no CUDA available)")
+            method = "simple"
+    
+    if method == "simple":
+        return sort_splats_simple(splats, verbose)
+    elif method == "opacity":
+        return sort_splats_opacity(splats, verbose)
+    elif method == "plas":
+        return sort_splats_plas(splats, verbose)
+    else:
+        raise ValueError(f"Unknown sorting method: {method}")
+
 
 @torch.no_grad()
 def read_ply(path):

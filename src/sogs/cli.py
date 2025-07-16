@@ -9,12 +9,13 @@ class Config:
     ply: Path
     output_dir: Path
     verbose: bool = True
+    sort_method: str = "auto"
 
 def main():
 	cfg = tyro.cli(Config)
 	os.makedirs(cfg.output_dir, exist_ok=True)
 	splats = read_ply(cfg.ply)
-	run_compression(cfg.output_dir, splats, cfg.verbose)
+	run_compression(cfg.output_dir, splats, cfg.verbose, cfg.sort_method)
 
 if __name__ == "__main__":
 	main()
