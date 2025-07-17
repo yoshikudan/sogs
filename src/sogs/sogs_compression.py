@@ -646,6 +646,264 @@ def sort_splats_multi_gpu(splats: Dict[str, Tensor], verbose: bool = True) -> Di
     return merged_splats
 
 
+def sort_splats_3d_octree(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats using 3D octree-based spatial partitioning.
+    
+    This algorithm recursively partitions 3D space into octants and sorts within each partition,
+    providing excellent 3D spatial coherence for compression.
+    
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using 3D octree sorting (hierarchical 3D spatial partitioning)")
+
+    # Use 3D positions directly
+    means = splats["means"]  # (n_gs, 3)
+    x, y, z = means[:, 0], means[:, 1], means[:, 2]
+    
+    # Normalize to [0, 1] range
+    x_norm = (x - x.min()) / (x.max() - x.min() + 1e-8)
+    y_norm = (y - y.min()) / (y.max() - y.min() + 1e-8)
+    z_norm = (z - z.min()) / (z.max() - z.min() + 1e-8)
+    
+    # Generate octree-based sorting indices
+    def octree_sort(x, y, z, max_depth=6):
+        """Generate octree-based sorting indices."""
+        indices = torch.arange(len(x), device=x.device)
+        sorted_indices = []
+        
+        def octree_recursive(x_sub, y_sub, z_sub, indices_sub, depth=0):
+            if depth >= max_depth or len(indices_sub) <= 1:
+                sorted_indices.extend(indices_sub.tolist())
+                return
+            
+            # Find center of current octant
+            x_center = x_sub.mean()
+            y_center = y_sub.mean()
+            z_center = z_sub.mean()
+            
+            # Split into 8 octants (3D equivalent of quadrants)
+            octants = [
+                (x_sub < x_center) & (y_sub < y_center) & (z_sub < z_center),      # 000
+                (x_sub >= x_center) & (y_sub < y_center) & (z_sub < z_center),     # 100
+                (x_sub < x_center) & (y_sub >= y_center) & (z_sub < z_center),     # 010
+                (x_sub >= x_center) & (y_sub >= y_center) & (z_sub < z_center),    # 110
+                (x_sub < x_center) & (y_sub < y_center) & (z_sub >= z_center),     # 001
+                (x_sub >= x_center) & (y_sub < y_center) & (z_sub >= z_center),    # 101
+                (x_sub < x_center) & (y_sub >= y_center) & (z_sub >= z_center),    # 011
+                (x_sub >= x_center) & (y_sub >= y_center) & (z_sub >= z_center)    # 111
+            ]
+            
+            # Process each octant recursively
+            for octant_mask in octants:
+                if octant_mask.sum() > 0:
+                    octree_recursive(
+                        x_sub[octant_mask],
+                        y_sub[octant_mask],
+                        z_sub[octant_mask],
+                        indices_sub[octant_mask],
+                        depth + 1
+                    )
+        
+        octree_recursive(x, y, z, indices)
+        return torch.tensor(sorted_indices, device=x.device)
+    
+    # Generate octree-based indices
+    octree_indices = octree_sort(x_norm, y_norm, z_norm)
+    
+    # Apply sorting to all splat parameters
+    for k, v in splats.items():
+        splats[k] = v[octree_indices]
+    
+    return splats
+
+
+def sort_splats_3d_hilbert(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats using 3D Hilbert curve for optimal 3D spatial coherence.
+    
+    3D Hilbert curves are space-filling curves that preserve spatial locality
+    in 3D space, providing excellent compression for 3D data.
+    
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using 3D Hilbert curve sorting (optimal 3D spatial coherence)")
+
+    # Use 3D positions directly
+    means = splats["means"]  # (n_gs, 3)
+    x, y, z = means[:, 0], means[:, 1], means[:, 2]
+    
+    # Normalize to [0, 1] range
+    x_norm = (x - x.min()) / (x.max() - x.min() + 1e-8)
+    y_norm = (y - y.min()) / (y.max() - y.min() + 1e-8)
+    z_norm = (z - z.min()) / (z.max() - z.min() + 1e-8)
+    
+    # Generate 3D Hilbert curve coordinates
+    def hilbert_curve_3d(x, y, z, order=10):
+        """Generate 3D Hilbert curve coordinates."""
+        # Convert to integer grid coordinates
+        x_int = (x * (2**order - 1)).long().clamp(0, 2**order - 1)
+        y_int = (y * (2**order - 1)).long().clamp(0, 2**order - 1)
+        z_int = (z * (2**order - 1)).long().clamp(0, 2**order - 1)
+        
+        # Compute 3D Hilbert curve index
+        hilbert_indices = torch.zeros_like(x_int)
+        
+        for i in range(order):
+            # Extract current bits
+            x_bit = (x_int >> i) & 1
+            y_bit = (y_int >> i) & 1
+            z_bit = (z_int >> i) & 1
+            
+            # 3D Hilbert curve transformation
+            if i == 0:
+                hilbert_indices = x_bit + 2 * y_bit + 4 * z_bit
+            else:
+                # 3D Hilbert curve pattern (simplified version)
+                hilbert_indices = hilbert_indices + (x_bit + 2 * y_bit + 4 * z_bit) * (8**i)
+        
+        return hilbert_indices.float() / (8**order - 1)
+    
+    # Generate 3D Hilbert curve indices
+    hilbert_indices = hilbert_curve_3d(x_norm, y_norm, z_norm)
+    
+    # Sort by 3D Hilbert curve index
+    sorted_indices = torch.argsort(hilbert_indices)
+    
+    # Apply sorting to all splat parameters
+    for k, v in splats.items():
+        splats[k] = v[sorted_indices]
+    
+    return splats
+
+
+def sort_splats_3d_kmeans(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats using 3D K-means clustering for spatial coherence.
+    
+    This algorithm uses K-means clustering in 3D space to group similar splats
+    together, then sorts within each cluster for optimal compression.
+    
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using 3D K-means clustering sorting")
+
+    # Use 3D positions for clustering
+    means = splats["means"]  # (n_gs, 3)
+    
+    # Determine number of clusters based on dataset size
+    n_clusters = min(64, max(8, n_gs // 10000))  # Adaptive clustering
+    
+    if verbose:
+        print(f"3D K-means: Using {n_clusters} clusters")
+    
+    # Use K-means clustering to group similar splats
+    from torchpq.clustering import KMeans
+    
+    # Convert to float16 for memory efficiency
+    means_half = means.half()
+    
+    # Run K-means clustering
+    kmeans = KMeans(n_clusters=n_clusters, distance="euclidean", verbose=verbose)
+    cluster_labels = kmeans.fit(means_half.permute(1, 0).contiguous())
+    cluster_labels = cluster_labels.detach().cpu().numpy()
+    
+    # Sort by cluster label first, then by position within cluster
+    cluster_indices = torch.from_numpy(cluster_labels).to(means.device)
+    
+    # Create sorting key: cluster_id * large_number + position_rank
+    # This ensures clusters are sorted first, then positions within clusters
+    max_cluster_size = n_gs // n_clusters + 1
+    position_ranks = torch.arange(n_gs, device=means.device)
+    
+    # Sort within each cluster by distance to cluster center
+    cluster_centers = kmeans.centroids.permute(1, 0)  # (n_clusters, 3)
+    
+    # Compute distances to cluster centers
+    distances_to_centers = torch.cdist(means_half, cluster_centers.half())
+    
+    # Get minimum distance for each point (distance to its assigned cluster)
+    min_distances = torch.min(distances_to_centers, dim=1)[0]
+    
+    # Create sorting key: cluster_id * max_cluster_size + distance_rank
+    sorting_key = cluster_indices * max_cluster_size + min_distances
+    
+    # Sort by the combined key
+    sorted_indices = torch.argsort(sorting_key)
+    
+    # Apply sorting to all splat parameters
+    for k, v in splats.items():
+        splats[k] = v[sorted_indices]
+    
+    return splats
+
+
+def sort_splats_3d_radial(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+    """Sort splats using 3D radial sorting from center.
+    
+    This algorithm sorts splats by their distance from the center of the scene,
+    creating a radial pattern that's often good for compression.
+    
+    Args:
+        splats (Dict[str, Tensor]): splats
+        verbose (bool, optional): Whether to print verbose information. Default to True.
+
+    Returns:
+        Dict[str, Tensor]: sorted splats
+    """
+    n_gs = len(splats["means"])
+    n_sidelen = int(n_gs**0.5)
+    assert n_sidelen**2 == n_gs, "Must be a perfect square"
+
+    if verbose:
+        print("Using 3D radial sorting (distance from center)")
+
+    # Use 3D positions
+    means = splats["means"]  # (n_gs, 3)
+    
+    # Find center of the scene
+    scene_center = means.mean(dim=0)
+    
+    # Compute distances from center
+    distances_from_center = torch.norm(means - scene_center, dim=1)
+    
+    # Sort by distance from center (closest first)
+    sorted_indices = torch.argsort(distances_from_center)
+    
+    # Apply sorting to all splat parameters
+    for k, v in splats.items():
+        splats[k] = v[sorted_indices]
+    
+    return splats
+
+
 def sort_splats(splats: Dict[str, Tensor], verbose: bool = True, method: str = "auto") -> Dict[str, Tensor]:
     """Sort splats using the specified method.
     
@@ -708,8 +966,16 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True, method: str = "
         return sort_splats_flas(splats, verbose)
     elif method == "multi_gpu":
         return sort_splats_multi_gpu(splats, verbose)
+    elif method == "3d_octree":
+        return sort_splats_3d_octree(splats, verbose)
+    elif method == "3d_hilbert":
+        return sort_splats_3d_hilbert(splats, verbose)
+    elif method == "3d_kmeans":
+        return sort_splats_3d_kmeans(splats, verbose)
+    elif method == "3d_radial":
+        return sort_splats_3d_radial(splats, verbose)
     else:
-        raise ValueError(f"Unknown sorting method: {method}. Available: simple, opacity, plas, flas, multi_gpu, auto, none")
+        raise ValueError(f"Unknown sorting method: {method}. Available: simple, opacity, plas, flas, multi_gpu, 3d_octree, 3d_hilbert, 3d_kmeans, 3d_radial, auto, none")
 
 
 @torch.no_grad()
